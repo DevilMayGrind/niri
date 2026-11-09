@@ -28,6 +28,9 @@ use crate::utils::transaction::{Transaction, TransactionBlocker};
 use crate::utils::ResizeEdge;
 use crate::window::ResolvedWindowRules;
 
+// Local addition: maximize-single-column.
+mod maximize_single_column;
+
 /// Amount of touchpad movement to scroll the view for the width of one working area.
 const VIEW_GESTURE_WORKING_AREA_MOVEMENT: f64 = 1200.;
 
@@ -188,6 +191,10 @@ pub struct Column<W: LayoutElement> {
 
     /// Whether this column is full-width.
     is_full_width: bool,
+
+    /// State for maximize-single-column, see maximize_single_column.rs.
+    is_sole_column: bool,
+    is_single_column_maximize_disabled: bool,
 
     /// Whether this column is going to be fullscreen.
     ///
@@ -532,6 +539,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         };
 
         let working_size = self.working_area.size;
+
+        let width = self.maximize_single_column_new_window_width(width);
 
         let width = if let Some(size) = width {
             let size = match resolve_preset_size(size, &self.options, working_size.w, extra.w) {
@@ -1022,6 +1031,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         );
         self.data.insert(idx, ColumnData::new(&column));
         self.columns.insert(idx, column);
+        self.update_sole_column();
 
         if !was_empty && idx <= self.active_column_idx {
             self.active_column_idx += 1;
@@ -1209,6 +1219,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         let column = self.columns.remove(column_idx);
         self.data.remove(column_idx);
+        self.update_sole_column();
 
         // Stop interactive resize.
         if let Some(resize) = &self.interactive_resize {
@@ -2817,7 +2828,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
 
         let col = &mut self.columns[self.active_column_idx];
-        if !col.pending_sizing_mode().is_normal() || col.is_full_width {
+        if !col.pending_sizing_mode().is_normal() || col.is_effectively_full_width() {
             return;
         }
 
@@ -4053,6 +4064,8 @@ impl<W: LayoutElement> Column<W> {
             width,
             preset_width_idx,
             is_full_width,
+            is_sole_column: false,
+            is_single_column_maximize_disabled: false,
             is_pending_maximized: false,
             is_pending_fullscreen: false,
             display_mode,
@@ -4125,6 +4138,10 @@ impl<W: LayoutElement> Column<W> {
         }
 
         if self.options.layout.gaps != options.layout.gaps {
+            update_sizes = true;
+        }
+
+        if self.options.layout.maximize_single_column != options.layout.maximize_single_column {
             update_sizes = true;
         }
 
@@ -4652,7 +4669,7 @@ impl<W: LayoutElement> Column<W> {
             .unwrap_or(f64::from(i32::MAX));
         let max_width = f64::max(max_width, min_width);
 
-        let width = if self.is_full_width {
+        let width = if self.is_effectively_full_width() {
             ColumnWidth::Proportion(1.)
         } else {
             self.width
@@ -4972,7 +4989,7 @@ impl<W: LayoutElement> Column<W> {
     fn toggle_width(&mut self, tile_idx: Option<usize>, forwards: bool) {
         let tile_idx = tile_idx.unwrap_or(self.active_tile_idx);
 
-        let preset_idx = if self.is_full_width || self.is_pending_maximized {
+        let preset_idx = if self.is_effectively_full_width() || self.is_pending_maximized {
             None
         } else {
             self.preset_width_idx
@@ -5025,6 +5042,8 @@ impl<W: LayoutElement> Column<W> {
             // Treat it as unmaximize.
             self.is_pending_maximized = false;
             self.is_full_width = false;
+        } else if !self.is_full_width && self.is_single_column_maximized() {
+            self.is_single_column_maximize_disabled = true;
         } else {
             self.is_full_width = !self.is_full_width;
         }
@@ -5033,7 +5052,7 @@ impl<W: LayoutElement> Column<W> {
     }
 
     fn set_column_width(&mut self, change: SizeChange, tile_idx: Option<usize>, animate: bool) {
-        let current = if self.is_full_width || self.is_pending_maximized {
+        let current = if self.is_effectively_full_width() || self.is_pending_maximized {
             ColumnWidth::Proportion(1.)
         } else {
             self.width
@@ -5084,6 +5103,7 @@ impl<W: LayoutElement> Column<W> {
         self.preset_width_idx = None;
         self.is_full_width = false;
         self.is_pending_maximized = false;
+        self.is_single_column_maximize_disabled |= self.is_sole_column;
         self.update_tile_sizes(animate);
     }
 
